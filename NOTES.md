@@ -44,3 +44,48 @@ docker ps / docker logs <id> / docker exec -it <id> sh
 - Write `api/.dockerignore` (`node_modules`, `dist`, `.env`)
 - Start Docker Desktop, build and run the API image; work out why `localhost` in `DATABASE_URL` doesn't reach Postgres from inside the container
 - Dockerfile for the poller, then `docker-compose.yml`
+
+## 2026-10-13: Containerised API and poller
+
+### What we did
+- Wrote `.dockerignore` for `api/` and `poller/`
+- Started Docker Desktop (already installed via Homebrew; no Colima needed)
+- Built and ran the API image; reached the Mac's Postgres via `host.docker.internal`, `/health` → 200
+- Wrote the poller Dockerfile; tested success and failure runs and checked their exit codes
+
+### Concepts
+- **Network namespaces:** each container has its own network stack and its own `localhost`. `localhost:5432` inside the container is the container itself, not the Mac
+- **Docker on macOS:** containers need a Linux kernel, so Docker Desktop runs a small Linux VM (Colima/OrbStack are alternatives)
+- **`host.docker.internal`:** Docker Desktop's hostname for the host machine. A workaround; with Compose, containers reach each other by service name
+- **`-p host:container`** publishes a container port on the Mac; `-e` overrides a value from `--env-file`
+- **Reading `docker run` usage:** `[OPTIONS] IMAGE [COMMAND]`: options go before the image name, anything after it is the container's command
+- **Image size:** ~98% of the image is the `node:24-alpine` base (the Node runtime); my layers are prod `node_modules` (API 16 MB, poller 1 MB) + `dist`. "Content size" = compressed, "disk usage" = unpacked
+- **Only the final stage ships:** `COPY . .` happens in the builder stage, so the runner stage only gets what is explicitly copied with `--from`
+- **BuildKit runs independent stages in parallel** (deps and builder)
+- **One-shot containers:** the poller exits when done; the exit code is the only signal (0 = ok, 1 = failed), which is what a CronJob will use later
+- **`docker inspect` shows all env vars in plain text**, including secrets
+
+### Mistakes and fixes
+- `.dockerignore` typos (`node_module`, `dists`): names must match exactly
+- `docker run` without an image name → "requires at least 1 argument"
+- Thought Docker needed Colima, but Docker Desktop was already installed and just not running (`open -a Docker`)
+- Remembered the wrong-country run as exit 0; `docker ps -a` showed it was exit 1 (`Unknown Country 'EU'`). Check exit codes instead of relying on memory
+- Changing `ITAD_COUNTRY` (US → AT) mixed USD and EUR rows in the price history
+- `.env.example` was renamed to `.env` instead of copied; recreated it
+
+### Useful commands
+```sh
+open -a Docker && docker version
+docker build --progress=plain -t gamedeals-api ./api
+docker history gamedeals-api                       # size per layer
+docker run --rm -p 3000:3000 --env-file .env -e DATABASE_URL=postgres://leonardoberrauch@host.docker.internal:5432/gamedeals gamedeals-api
+docker run --rm --entrypoint sh gamedeals-api -c 'whoami; du -sh node_modules'
+docker ps -a                                       # includes exited containers + exit status
+docker inspect --format '{{.State.ExitCode}}' <name>
+docker logs <name>                                 # works on exited containers too
+docker rm <name> / docker container prune
+```
+
+### Next
+- Delete the old USD rows (`delete from price_snapshots where currency = 'USD'`), or start fresh with a Postgres container
+- `docker-compose.yml`: API + poller + Postgres as a container, service-name DNS instead of `host.docker.internal`, a volume for the database data, `db/init.sql` to create the schema on first start
