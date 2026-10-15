@@ -151,10 +151,6 @@ curl -v ...                                      # see exactly what curl sends
 ```
 
 ### Next
-- **Persistence test:** `docker compose down`, `docker compose up -d`, then `curl localhost:3000/wishlist`; Hades should still be there
-- Optional cleanups:
-  - remove the redundant `env_file: .env` from `db`
-  - use `${POSTGRES_PASSWORD:?...}` for required variables
-  - quote the ports (`"3000:3000"`)
-- Commit `docker-compose.yaml` and the `.env.example` changes
-- Phase 2 then done → **Phase 3: Kubernetes basics** (k3d cluster, Deployments, Services, ConfigMap, Secret, Postgres StatefulSet + PVC)
+- Done afterwards: persistence test passed (Hades survived `down`/`up`), removed `env_file` from `db`, `${VAR:?}` on the Postgres variables, quoted ports. **Phase 2 is complete**
+- Commit the final `docker-compose.yaml` changes (they were still uncommitted)
+- **Phase 3: Kubernetes basics**: k3d cluster, Deployments, Services, ConfigMap, Secret, Postgres StatefulSet + PVC
