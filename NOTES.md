@@ -89,3 +89,72 @@ docker rm <name> / docker container prune
 ### Next
 - Delete the old USD rows (`delete from price_snapshots where currency = 'USD'`), or start fresh with a Postgres container
 - `docker-compose.yml`: API + poller + Postgres as a container, service-name DNS instead of `host.docker.internal`, a volume for the database data, `db/init.sql` to create the schema on first start
+
+## 2026-10-14/15: Docker Compose
+
+### What we did
+- Wrote `docker-compose.yaml`: `db` (Postgres), `api` and `poller`, all started with one command
+- Postgres now runs as a container (`postgres:18-alpine`) with a named volume; `db/init.sql` creates the schema on first start
+- `api` and `poller` reach the database by service name (`db`), no more `host.docker.internal`
+- Healthcheck on `db`, so `api` and `poller` only start once Postgres accepts connections
+- Full flow works in containers: POST a game → poller run → `/wishlist` shows EUR prices
+
+### Concepts
+- **Compose = the whole stack in one declarative file.** Describe the desired state, Compose creates it (the same idea Kubernetes uses)
+- **Compose network + DNS:** every service is reachable by its service name (`postgres://...@db:5432/...`)
+- **Image reference = `repository:tag`.** `postgres:18-alpine`; a tag alone (`18-alpine`) isn't a valid image. Tags like `18`, `18-trixie`, `18-bookworm` and `18-alpine` are variants of the same image with different base OSes
+- **`image:` vs `build:`:** use a ready-made image vs build from a Dockerfile in a folder
+- **Ports `"host:container"`:** one string; the right side is the port the app listens on inside the container, the left side is what I `curl` on the Mac. A single number publishes on a random host port. `db` publishes no port at all: other containers reach it over the Compose network
+- **Named volume vs bind mount:**
+  - `pgdata:/var/lib/postgresql` = storage managed by Docker that survives `down`
+  - `./db/init.sql:/docker-entrypoint-initdb.d/init.sql` = a file from the repo mounted into the container
+  - Named volumes must also be declared under the top-level `volumes:`
+- **Postgres 18 changed the data path:** mount `/var/lib/postgresql`, not the old `/var/lib/postgresql/data` from older tutorials
+- **Init scripts only run on an empty data directory** (first start). Schema changes later need `down -v` (wipes data) or a migration
+- **`depends_on` alone only waits for "container started"**; with `condition: service_healthy` + a `healthcheck` it waits for "ready"
+- **Healthcheck:** runs inside the container, so it has to use tools in that image (`pg_isready`, not `curl`). `CMD` runs without a shell; `CMD-SHELL` expands variables
+- **Three ways `.env` is used:**
+  1. **Interpolation:** Compose reads `.env` automatically and replaces `${VAR}` in the YAML on the host, before anything starts
+  2. **`env_file:`** copies every line of `.env` into that container's environment at runtime
+  3. **`$${VAR}`** escapes interpolation, so the shell inside the container expands it from the container's environment
+- **Least privilege:** `db` gets only the Postgres variables via `environment:`, not the whole `.env` (it doesn't need the ITAD key)
+- **`${VAR:?message}`** makes Compose fail loudly when a variable is missing, instead of silently using an empty string
+- **`docker compose config` prints secrets in plain text.** Use `config -q` to validate and `config --variables` to list the variables used
+
+### Mistakes and fixes
+- YAML: two `key:` pairs on one line (`depends_on: condition: ...`), so each level needs its own line and indentation
+- `env-file` → `env_file` (Compose keys use underscores)
+- Ports written as YAML keys (`- host: 5432`, `- container: 5432`) and with the wrong port (5432 is Postgres, the API listens on 3000)
+- `image: ./db`, `image: alpine3.24` and `image: 18-alpine` → `postgres:18-alpine`
+- Healthcheck copied from the docs used `curl localhost:8080`, but Postgres has no HTTP and no curl → `pg_isready`
+- `DATABASE_URL` with `localhost` (same mistake as with plain Docker) → service name `db`
+- An unused `DATABASE_PASSWORD` variable and a hardcoded password in the compose file → `${POSTGRES_PASSWORD}` from `.env` inside the URL
+- `POSTGRES_DB=gamedeal` vs `.../gamedeals` in the URL
+- `poller` depended on `api` being healthy (api has no healthcheck, and the poller only needs `db`)
+- Empty top-level `volumes:` → "volumes must be a mapping"
+- `curl` POST → `400 "Client Error"` with nothing in the API logs: the HTTP request itself was malformed (copy-pasted curly quotes / hidden characters). Fixed by typing the command by hand. Debug with `curl -v` and `pbpaste | cat -v`
+- Claude sent a test POST itself, so Hades was already in the DB → my own POST got `409 already on the wishlist`
+
+### Useful commands
+```sh
+docker compose config -q                         # validate (silent = OK)
+docker compose config --variables                # which ${VARS} the file uses
+docker compose up -d --build
+docker compose ps -a                             # health status + exited one-shot containers
+docker compose logs -f api / docker compose logs db | grep init.sql
+docker compose exec db sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+docker compose run --rm poller
+docker compose down                              # stop + remove containers, volume stays
+docker compose down -v                           # ... and DELETE the volume (all data)
+docker volume ls / docker volume inspect dev_pgdata
+curl -v ...                                      # see exactly what curl sends
+```
+
+### Next
+- **Persistence test:** `docker compose down`, `docker compose up -d`, then `curl localhost:3000/wishlist`; Hades should still be there
+- Optional cleanups:
+  - remove the redundant `env_file: .env` from `db`
+  - use `${POSTGRES_PASSWORD:?...}` for required variables
+  - quote the ports (`"3000:3000"`)
+- Commit `docker-compose.yaml` and the `.env.example` changes
+- Phase 2 then done → **Phase 3: Kubernetes basics** (k3d cluster, Deployments, Services, ConfigMap, Secret, Postgres StatefulSet + PVC)
